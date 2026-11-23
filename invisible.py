@@ -240,7 +240,7 @@ def choose_visible_prefix() -> str | None:
 
 
 def encode_flow() -> None:
-    message = read_message("Message to hide:")
+    message = read_manual("Message to hide:")
     visible_prefix = choose_visible_prefix()
     if visible_prefix is None:
         print("Returned to main menu.")
