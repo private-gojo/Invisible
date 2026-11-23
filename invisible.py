@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive Unicode text encoder/decoder for Termux and standard Python."""
+"""Interactive Unicode text encoder / decoder for Termux and standard Python."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def tag_ascii(value: str) -> str:
 
 def read_manual(prompt: str) -> str:
     print(f"\n{prompt}")
-    print("Type one line, then press Enter. Use clipboard input for multiline text.")
+    print("Type one line, then press Enter. For multiline text, copy it to the clipboard first.")
     try:
         value = input("> ")
     except EOFError:
@@ -65,20 +65,17 @@ def read_clipboard(prompt: str) -> str:
     if not result.stdout:
         raise ValueError("Clipboard is empty.")
     print(f"\n{prompt}")
-    print(f"Clipboard input loaded ({len(result.stdout)} characters).")
+    print(f"Clipboard message loaded ({len(result.stdout)} characters).")
     return result.stdout
 
 
 def read_message(prompt: str) -> str:
-    print("\nInput source:")
-    print("[1] Clipboard (default, supports multiline)")
-    print("[2] Type manually (single line)")
-    choice = input("Select [1-2, Enter=1]: ").strip() or "1"
-    if choice == "1":
+    try:
         return read_clipboard(prompt)
-    if choice == "2":
+    except ValueError as exc:
+        print(f"\n{exc}")
+        print("Manual input fallback:")
         return read_manual(prompt)
-    raise ValueError("Invalid input source.")
 
 
 def encode_tags(value: str, visible_prefix: str = TAG_PREFIX) -> str:
@@ -227,15 +224,33 @@ def timestamped_name(prefix: str) -> str:
     return f"{prefix}_{stamp}.txt"
 
 
+def choose_visible_prefix() -> str | None:
+    print("\nChoose visible text:")
+    print("[1] Default (how)")
+    print("[2] Custom")
+    print("[3] Back")
+    choice = input("Select [1-3, Enter=1]: ").strip() or "1"
+    if choice == "1":
+        return TAG_PREFIX
+    if choice == "2":
+        return input("Enter custom visible text (text/emoji/symbols): ")
+    if choice == "3":
+        return None
+    raise ValueError("Invalid visible-text choice.")
+
+
 def encode_flow() -> None:
-    message = read_message("Source message:")
-    visible_prefix = input("\nCustom visible prefix (any text/emoji; Enter for none): ")
+    message = read_message("Message to hide:")
+    visible_prefix = choose_visible_prefix()
+    if visible_prefix is None:
+        print("Returned to main menu.")
+        return
     encoded = encode_tags(message, visible_prefix)
     decoded, _ = decode_payload(encoded)
     if decoded != message:
         raise RuntimeError("Round-trip verification failed. Output was not delivered.")
     print("\nInvisible v2 output:")
-    print(f"Visible prefix: {visible_prefix!r}")
+    print(f"Visible text: {visible_prefix!r}")
     print("Hidden payload: UTF-8 bytes encoded as invisible Unicode Tag characters.")
     print("\nEncoded result:")
     print(encoded)
