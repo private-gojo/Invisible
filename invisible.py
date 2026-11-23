@@ -144,27 +144,16 @@ def timestamped_name(prefix: str) -> str:
 
 def encode_flow() -> None:
     message = read_message("Enter your message:")
-    print("\nEncoding:")
-    print("[1] Unicode Tags (experimental)")
-    print("[2] Base64")
-    choice = input("Select [1-2]: ").strip()
-
-    if choice == "1":
-        encoded = encode_tags(message)
-        decoded = decode_tags(encoded)
-        label = "Unicode Tags"
-    elif choice == "2":
-        encoded = encode_base64(message)
-        decoded = decode_base64(encoded)
-        label = "Base64"
-    else:
-        print("Invalid encoding choice.")
-        return
+    encoded = encode_tags(message)
+    decoded = decode_tags(encoded)
 
     if decoded != message:
         raise RuntimeError("Round-trip verification failed. Output was not delivered.")
 
-    print(f"\n{label} output:")
+    print("\nUnicode Tags output:")
+    print("Visible text: how")
+    print("Hidden payload: attached as invisible Unicode Tag characters.")
+    print("\nEncoded result:")
     print(encoded)
     print("\nRound-trip verification: PASS")
     deliver(encoded, timestamped_name("encoded"))
@@ -172,20 +161,15 @@ def encode_flow() -> None:
 
 def decode_flow() -> None:
     payload = read_message("Paste encoded payload:")
-    print("\nPayload format:")
-    print("[1] Unicode Tags")
-    print("[2] Base64")
-    choice = input("Select [1-2]: ").strip()
 
-    if choice == "1":
+    if payload.startswith(TAG_PREFIX + chr(TAG_BEGIN)):
         decoded = decode_tags(payload)
-    elif choice == "2":
-        decoded = decode_base64(payload)
+        label = "Unicode Tags"
     else:
-        print("Invalid format choice.")
-        return
+        decoded = decode_base64(payload)
+        label = "Base64"
 
-    print("\nDecoded message:")
+    print(f"\nDecoded message ({label}):")
     print("-" * 40)
     print(decoded)
     print("-" * 40)
