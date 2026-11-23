@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Interactive text encoder/decoder for Termux and standard Python."""
+"""Interactive Unicode text encoder/decoder for Termux and standard Python."""
 
 from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
+import hmac
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,7 @@ TAG_BASE = 0xE0000
 TAG_BEGIN = 0xE0001
 TAG_CANCEL = 0xE007F
 TAG_PREFIX = "how"
+V2_MAGIC = "INV2:"
 OUTPUT_DIR = Path("output")
 
 
@@ -22,47 +25,122 @@ class UserCancelled(Exception):
     pass
 
 
-def read_message(prompt: str) -> str:
+def tag_ascii(value: str) -> str:
+    return "".join(chr(TAG_BASE + ord(char)) for char in value)
+
+
+def read_manual(prompt: str) -> str:
     print(f"\n{prompt}")
-    print("Paste or type your message, then press Enter.")
+    print("Type one line, then press Enter. Use clipboard input for multiline text.")
     try:
         value = input("> ")
     except EOFError:
         raise UserCancelled
-
-    if not value.strip():
+    if not value:
         raise ValueError("Input cannot be empty.")
     return value
 
 
-def encode_tags(value: str) -> str:
-    allowed = set("\n\r\t")
-    for char in value:
-        if not (0x20 <= ord(char) <= 0x7E or char in allowed):
-            raise ValueError(
-                "Unicode Tags mode accepts printable ASCII, newline, "
-                "carriage return, and tab only. Use Base64 for Unicode text."
-            )
+def read_clipboard(prompt: str) -> str:
+    command = shutil.which("termux-clipboard-get")
+    if not command:
+        raise ValueError(
+            "Clipboard input unavailable: termux-clipboard-get was not found. "
+            "Install Termux:API and the termux-api package."
+        )
+    try:
+        result = subprocess.run(
+            [command],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"Clipboard read failed: {exc}") from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "unknown error"
+        raise ValueError(f"Clipboard read failed: {detail}")
+    if not result.stdout:
+        raise ValueError("Clipboard is empty.")
+    print(f"\n{prompt}")
+    print(f"Clipboard input loaded ({len(result.stdout)} characters).")
+    return result.stdout
 
-    payload = "".join(chr(TAG_BASE + ord(char)) for char in value)
-    return TAG_PREFIX + chr(TAG_BEGIN) + payload + chr(TAG_CANCEL)
+
+def read_message(prompt: str) -> str:
+    print("\nInput source:")
+    print("[1] Clipboard (default, supports multiline)")
+    print("[2] Type manually (single line)")
+    choice = input("Select [1-2, Enter=1]: ").strip() or "1"
+    if choice == "1":
+        return read_clipboard(prompt)
+    if choice == "2":
+        return read_manual(prompt)
+    raise ValueError("Invalid input source.")
 
 
-def decode_tags(value: str) -> str:
+def encode_tags(value: str, visible_prefix: str = TAG_PREFIX) -> str:
+    raw = value.encode("utf-8")
+    payload_hex = raw.hex()
+    checksum = hashlib.sha256(raw).hexdigest()[:16]
+    framed = V2_MAGIC + payload_hex + ":" + checksum
+    return visible_prefix + chr(TAG_BEGIN) + tag_ascii(framed) + chr(TAG_CANCEL)
+
+
+def _decode_v2(value: str) -> str:
+    marker = chr(TAG_BEGIN) + tag_ascii(V2_MAGIC)
+    search_from = 0
+    while True:
+        start = value.find(marker, search_from)
+        if start < 0:
+            break
+        end = value.find(chr(TAG_CANCEL), start + len(marker))
+        if end >= 0:
+            tagged = value[start + len(chr(TAG_BEGIN)):end]
+            try:
+                decoded_ascii = "".join(
+                    chr(ord(char) - TAG_BASE) for char in tagged
+                )
+                if not decoded_ascii.startswith(V2_MAGIC):
+                    raise ValueError("Invalid version marker.")
+                fields = decoded_ascii[len(V2_MAGIC):].split(":")
+                if len(fields) != 2:
+                    raise ValueError("Invalid frame structure.")
+                payload_hex, checksum = fields
+                if len(payload_hex) % 2 or any(
+                    char not in "0123456789abcdefABCDEF" for char in payload_hex
+                ):
+                    raise ValueError("Invalid payload encoding.")
+                if len(checksum) != 16 or any(
+                    char not in "0123456789abcdef" for char in checksum
+                ):
+                    raise ValueError("Invalid integrity field.")
+                raw = bytes.fromhex(payload_hex)
+                expected = hashlib.sha256(raw).hexdigest()[:16]
+                if not hmac.compare_digest(checksum, expected):
+                    raise ValueError("Integrity check failed.")
+                return raw.decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                search_from = start + 1
+                continue
+        search_from = start + 1
+    raise ValueError("No valid Invisible v2 payload was found.")
+
+
+def decode_legacy_tags(value: str) -> str:
     prefix = TAG_PREFIX + chr(TAG_BEGIN)
     if not value.startswith(prefix) or not value.endswith(chr(TAG_CANCEL)):
-        raise ValueError("Invalid Unicode Tags payload or missing markers.")
-
+        raise ValueError("Invalid legacy Unicode Tags payload or missing markers.")
     payload = value[len(prefix):-1]
     decoded = []
-
     for char in payload:
         codepoint = ord(char)
-        if not (TAG_BASE + 0x20 <= codepoint <= TAG_BASE + 0x7E):
-            if codepoint not in (TAG_BASE + 0x0A, TAG_BASE + 0x0D, TAG_BASE + 0x09):
-                raise ValueError("Payload contains an unsupported Tag character.")
-        decoded.append(chr(codepoint - TAG_BASE))
-
+        offset = codepoint - TAG_BASE
+        if not (0x20 <= offset <= 0x7E or offset in (0x09, 0x0A, 0x0D)):
+            raise ValueError("Legacy payload contains an unsupported Tag character.")
+        decoded.append(chr(offset))
     return "".join(decoded)
 
 
@@ -78,18 +156,28 @@ def decode_base64(value: str) -> str:
         raise ValueError(f"Invalid Base64 payload: {exc}") from exc
 
 
+def decode_payload(value: str) -> tuple[str, str]:
+    try:
+        return _decode_v2(value), "Invisible v2"
+    except ValueError:
+        pass
+    if value.startswith(TAG_PREFIX + chr(TAG_BEGIN)):
+        return decode_legacy_tags(value), "Legacy Unicode Tags"
+    return decode_base64(value), "Base64"
+
+
 def copy_clipboard(value: str) -> bool:
     command = shutil.which("termux-clipboard-set")
     if not command:
         print("Clipboard unavailable: termux-clipboard-set was not found.")
         print("Install Termux:API and the termux-api package to enable it.")
         return False
-
     try:
         result = subprocess.run(
             [command],
             input=value,
             text=True,
+            encoding="utf-8",
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -97,12 +185,10 @@ def copy_clipboard(value: str) -> bool:
     except OSError as exc:
         print(f"Clipboard error: {exc}")
         return False
-
     if result.returncode != 0:
         detail = result.stderr.strip() or "unknown error"
         print(f"Clipboard error: {detail}")
         return False
-
     print("Copied to clipboard.")
     return True
 
@@ -125,7 +211,6 @@ def deliver(value: str, filename: str) -> None:
     print("[2] Clipboard")
     print("[3] Save to file")
     print("[4] Clipboard + file")
-
     choice = input("Select [1-4]: ").strip()
     if choice == "1":
         return
@@ -143,32 +228,25 @@ def timestamped_name(prefix: str) -> str:
 
 
 def encode_flow() -> None:
-    message = read_message("Enter your message:")
-    encoded = encode_tags(message)
-    decoded = decode_tags(encoded)
-
+    message = read_message("Source message:")
+    visible_prefix = input("\nCustom visible prefix (any text/emoji; Enter for none): ")
+    encoded = encode_tags(message, visible_prefix)
+    decoded, _ = decode_payload(encoded)
     if decoded != message:
         raise RuntimeError("Round-trip verification failed. Output was not delivered.")
-
-    print("\nUnicode Tags output:")
-    print("Visible text: how")
-    print("Hidden payload: attached as invisible Unicode Tag characters.")
+    print("\nInvisible v2 output:")
+    print(f"Visible prefix: {visible_prefix!r}")
+    print("Hidden payload: UTF-8 bytes encoded as invisible Unicode Tag characters.")
     print("\nEncoded result:")
     print(encoded)
     print("\nRound-trip verification: PASS")
+    print("Integrity check: PASS")
     deliver(encoded, timestamped_name("encoded"))
 
 
 def decode_flow() -> None:
-    payload = read_message("Paste encoded payload:")
-
-    if payload.startswith(TAG_PREFIX + chr(TAG_BEGIN)):
-        decoded = decode_tags(payload)
-        label = "Unicode Tags"
-    else:
-        decoded = decode_base64(payload)
-        label = "Base64"
-
+    payload = read_message("Encoded payload:")
+    decoded, label = decode_payload(payload)
     print(f"\nDecoded message ({label}):")
     print("-" * 40)
     print(decoded)
@@ -178,14 +256,12 @@ def decode_flow() -> None:
 
 def main() -> int:
     print("INVISIBLE")
-    print("Interactive text encoder / decoder")
-
+    print("Interactive Unicode text encoder / decoder")
     while True:
         print("\n[1] Encode")
         print("[2] Decode")
         print("[3] Exit")
         choice = input("Select [1-3]: ").strip()
-
         try:
             if choice == "1":
                 encode_flow()
