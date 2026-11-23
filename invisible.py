@@ -22,23 +22,15 @@ class UserCancelled(Exception):
     pass
 
 
-def read_multiline(prompt: str) -> str:
+def read_message(prompt: str) -> str:
     print(f"\n{prompt}")
-    print("Enter .END on a line by itself to finish.")
-    lines = []
+    print("Paste or type your message, then press Enter.")
+    try:
+        value = input("> ")
+    except EOFError:
+        raise UserCancelled
 
-    while True:
-        try:
-            line = input()
-        except EOFError:
-            raise UserCancelled
-
-        if line == ".END":
-            break
-        lines.append(line)
-
-    value = "\n".join(lines)
-    if not value:
+    if not value.strip():
         raise ValueError("Input cannot be empty.")
     return value
 
@@ -151,7 +143,7 @@ def timestamped_name(prefix: str) -> str:
 
 
 def encode_flow() -> None:
-    message = read_multiline("Enter your message:")
+    message = read_message("Enter your message:")
     print("\nEncoding:")
     print("[1] Unicode Tags (experimental)")
     print("[2] Base64")
@@ -179,7 +171,7 @@ def encode_flow() -> None:
 
 
 def decode_flow() -> None:
-    payload = read_multiline("Paste encoded payload:")
+    payload = read_message("Paste encoded payload:")
     print("\nPayload format:")
     print("[1] Unicode Tags")
     print("[2] Base64")
