@@ -5,11 +5,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import os
+import select
 import shutil
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import termios
+except ImportError:  # non-POSIX platforms
+    termios = None
 
 TAG_BASE = 0xE0000
 TAG_BEGIN = 0xE0001
@@ -22,14 +29,89 @@ class UserCancelled(Exception):
     pass
 
 
+def drain_pending(timeout: float = 0.3) -> str:
+    """Collect text that arrived right after the first line (multiline paste).
+
+    The wait starts only after the first line was submitted, so typing speed
+    is never limited. Canonical mode is switched off for the drain so a last
+    pasted line without a trailing newline is also readable.
+    """
+    if termios is None or not sys.stdin.isatty():
+        return ""
+
+    fd = sys.stdin.fileno()
+    try:
+        saved = termios.tcgetattr(fd)
+        raw = termios.tcgetattr(fd)
+    except termios.error:
+        return ""
+
+    raw[3] &= ~termios.ICANON
+    raw[6][termios.VMIN] = 1
+    raw[6][termios.VTIME] = 0
+
+    chunks = []
+    try:
+        termios.tcsetattr(fd, termios.TCSANOW, raw)
+        while select.select([fd], [], [], timeout)[0]:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+    except OSError:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def read_clipboard() -> str:
+    command = shutil.which("termux-clipboard-get")
+    if not command:
+        raise ValueError(
+            "termux-clipboard-get was not found. "
+            "Install Termux:API and the termux-api package."
+        )
+
+    try:
+        result = subprocess.run(
+            [command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+    except OSError as exc:
+        raise ValueError(f"Clipboard error: {exc}") from exc
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "unknown error"
+        raise ValueError(f"Clipboard error: {detail}")
+    return result.stdout
+
+
 def read_message(prompt: str) -> str:
     print(f"\n{prompt}")
-    print("Paste or type your message, then press Enter.")
+    print("Type or paste your message, then press Enter.")
+    print("Multiline paste is detected automatically. Enter 'c' to use the clipboard.")
     try:
-        value = input("> ")
+        first = input("> ")
+        if first.strip().lower() == "c":
+            value = read_clipboard()
+        else:
+            value = first
+            extra = drain_pending()
+            if extra:
+                value = first + "\n" + extra
+                if not extra.endswith(("\n", "\r")):
+                    # Pasted text had no final newline; the user's Enter is
+                    # still to come, so consume it here instead of the menu.
+                    input("(Paste received. Press Enter to continue) ")
     except EOFError:
         raise UserCancelled
 
+    value = value.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
     if not value.strip():
         raise ValueError("Input cannot be empty.")
     return value
