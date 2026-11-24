@@ -6,10 +6,12 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import re
 import select
 import shutil
 import subprocess
 import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
@@ -117,13 +119,96 @@ def read_message(prompt: str) -> str:
     return value
 
 
-def encode_tags(value: str) -> str:
-    allowed = set("\n\r\t")
+PUNCT_MAP = str.maketrans(
+    {
+        "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+        "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+        "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+        "\u2014": "-", "\u2015": "-", "\u2212": "-",
+        "\u2026": "...", "\u2022": "*", "\u00b7": "*",
+        "\u2192": "->", "\u2190": "<-", "\u00d7": "x",
+        "\u00a0": " ", "\u2002": " ", "\u2003": " ", "\u2009": " ",
+        "\u202f": " ", "\u3000": " ",
+    }
+)
+# Invisible helpers that carry no text of their own.
+DROP_CHARS = set("\u200b\u200c\u200d\u2060\ufeff\ufe0e\ufe0f")
+ESCAPE_RE = re.compile(r"\\u\{([0-9A-Fa-f]{1,6})\}")
+
+
+def is_tag_safe(char: str) -> bool:
+    return 0x20 <= ord(char) <= 0x7E or char in "\n\r\t"
+
+
+def sanitize_for_tags(value: str) -> tuple[str, list[str]]:
+    """Make any text encodable: convert common Unicode to ASCII, escape the rest.
+
+    Returns the cleaned text and short notes describing what was changed.
+    """
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    converted = 0
+    dropped = 0
+    escaped: list[str] = []
+    out: list[str] = []
+
     for char in value:
-        if not (0x20 <= ord(char) <= 0x7E or char in allowed):
+        if is_tag_safe(char):
+            out.append(char)
+            continue
+        if char in DROP_CHARS:
+            dropped += 1
+            continue
+
+        mapped = char.translate(PUNCT_MAP)
+        if mapped != char:
+            out.append(mapped)
+            converted += 1
+            continue
+
+        base = "".join(
+            part
+            for part in unicodedata.normalize("NFKD", char)
+            if not unicodedata.combining(part)
+        )
+        if base and all(is_tag_safe(part) for part in base):
+            out.append(base)
+            converted += 1
+            continue
+
+        if ord(char) < 0x20 or ord(char) == 0x7F:
+            dropped += 1  # stray control characters
+            continue
+
+        out.append("\\u{%X}" % ord(char))
+        if char not in escaped:
+            escaped.append(char)
+
+    notes = []
+    if converted:
+        notes.append(f"{converted} character(s) converted to ASCII (quotes, dashes, accents...)")
+    if dropped:
+        notes.append(f"{dropped} invisible/control character(s) removed")
+    if escaped:
+        shown = " ".join(f"{c}=U+{ord(c):X}" for c in escaped[:10])
+        more = "" if len(escaped) <= 10 else f" (+{len(escaped) - 10} more)"
+        notes.append(f"{len(escaped)} unique character(s) escaped as \\u{{HEX}}: {shown}{more}")
+    return "".join(out), notes
+
+
+def restore_escapes(value: str) -> str:
+    def repl(match: re.Match) -> str:
+        codepoint = int(match.group(1), 16)
+        return chr(codepoint) if codepoint <= 0x10FFFF else match.group(0)
+
+    return ESCAPE_RE.sub(repl, value)
+
+
+def encode_tags(value: str) -> str:
+    for index, char in enumerate(value):
+        if not is_tag_safe(char):
             raise ValueError(
-                "Unicode Tags mode accepts printable ASCII, newline, "
-                "carriage return, and tab only. Use Base64 for Unicode text."
+                f"Character {char!r} (U+{ord(char):X}) at position {index} "
+                "cannot be encoded as a Unicode Tag."
             )
 
     payload = "".join(chr(TAG_BASE + ord(char)) for char in value)
@@ -225,13 +310,20 @@ def timestamped_name(prefix: str) -> str:
 
 
 def encode_flow() -> None:
-    message = read_message("Enter your message:")
+    raw_message = read_message("Enter your message:")
+    message, notes = sanitize_for_tags(raw_message)
+    for note in notes:
+        print(f"Note: {note}")
+    if not message.strip():
+        raise ValueError("Nothing left to encode after cleanup.")
+
     encoded = encode_tags(message)
     decoded = decode_tags(encoded)
 
     if decoded != message:
         raise RuntimeError("Round-trip verification failed. Output was not delivered.")
 
+    print(f"\nHidden length: {len(message)} characters")
     print("\nUnicode Tags output:")
     print("Visible text: how")
     print("Hidden payload: attached as invisible Unicode Tag characters.")
@@ -245,7 +337,7 @@ def decode_flow() -> None:
     payload = read_message("Paste encoded payload:")
 
     if payload.startswith(TAG_PREFIX + chr(TAG_BEGIN)):
-        decoded = decode_tags(payload)
+        decoded = restore_escapes(decode_tags(payload))
         label = "Unicode Tags"
     else:
         decoded = decode_base64(payload)
