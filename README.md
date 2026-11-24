@@ -6,7 +6,7 @@ The visible text of an encoded message is just `how`. The real message is attach
 
 ## Features
 
-- Encode printable ASCII text (plus newline, carriage return, tab) into Unicode Tags
+- Encode any pasted text into Unicode Tags: common Unicode is converted to ASCII, the rest is escaped, nothing makes it fail
 - Decode Unicode Tags payloads, with Base64 as a fallback for decode
 - Typing and multiline paste both work, no terminator needed
 - Clipboard input (`c`) for very long messages
@@ -90,13 +90,17 @@ Main menu:
 
 Copy the result (option `2` or `4`, or select it manually) and send it where you want. Only `how` will be visible.
 
-Encode accepts printable ASCII, newline, carriage return, and tab. Other characters (for example accented letters or emoji) are rejected with an error.
+Any text is accepted. Unicode Tags can only carry ASCII, so before encoding the tool cleans the message and prints a `Note:` for each change:
+
+- Smart quotes, dashes, `...`, bullets, arrows and accents (`ñ` becomes `n`) are converted to plain ASCII.
+- Zero-width characters and stray control characters are removed.
+- Anything else (emoji, Japanese, etc.) is escaped as `\u{HEX}`, for example `🔥` becomes `\u{1F525}`. The receiving side sees that escape as plain text; Decode turns it back into the real character.
 
 ### Decode
 
 1. Choose `2`.
 2. Paste the encoded text (type `c` to read it from the clipboard).
-3. The decoded message is printed, and you can deliver it the same way as above.
+3. The decoded message is printed (`\u{HEX}` escapes are turned back into characters), and you can deliver it the same way as above.
 
 Decode expects a payload that starts with `how` followed by the hidden characters and ends with the cancel tag. If it does not look like a Tags payload, it is tried as Base64 instead.
 
@@ -114,5 +118,6 @@ The folder contents are git-ignored.
 - **Long messages:** each hidden character takes 2 UTF-16 units / 4 UTF-8 bytes, and apps or AI input limits may count or tokenize them heavily. Very long hidden messages may be cut off or ignored by the receiving app.
 - **Terminal line limit:** a single typed or pasted line over roughly 4096 characters is truncated by the terminal itself. Use `c` (clipboard) for anything longer.
 - **Platform stripping:** messaging apps may remove or normalize Unicode Tag characters. Encoding is experimental and not a guarantee of invisible transport.
+- **Escapes:** a message that literally contains text like `\u{41}` will be shown as `A` after Decode.
 - **Decode is strict:** extra text around the payload, a trailing space, or a missing marker will make decode fail.
 - Base64 is an encoding, not encryption. Anyone can decode it.
